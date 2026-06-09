@@ -3,3 +3,4 @@ uvicorn
 requests
 pillow
 pydantic
+openai>=1.30.0
