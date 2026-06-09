@@ -3,6 +3,7 @@ import uuid
 import time
 import math
 import json
+import base64
 from io import BytesIO
 from typing import Any, Dict, List, Optional
 
@@ -12,12 +13,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from PIL import Image, ImageDraw, ImageFont
-
-from google import genai
-from google.genai import types
+from openai import OpenAI
 
 
-app = FastAPI(title="Sidewalk Annotation API", version="2.0.0")
+app = FastAPI(title="Sidewalk Annotation API", version="3.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -34,8 +33,12 @@ app.mount("/static", StaticFiles(directory=OUTPUT_DIR), name="static")
 # Optional: protect Render API with x-api-key.
 API_KEY = os.getenv("API_KEY", "").strip()
 
-# Required for Gemini endpoints.
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+# OpenAI-compatible proxy config.
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "").strip()
+
+# Recommended model from your proxy platform.
+VISION_MODEL = os.getenv("VISION_MODEL", "gemini-3-flash-preview").strip()
 
 
 class AnnotationItem(BaseModel):
@@ -71,7 +74,9 @@ def root():
     return {
         "service": "Sidewalk Annotation API",
         "status": "ok",
-        "version": "2.0.0",
+        "version": "3.0.0",
+        "mode": "openai-compatible",
+        "model": VISION_MODEL,
         "endpoints": [
             "GET /health",
             "POST /gemini_element",
@@ -83,7 +88,14 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "draw_st": "ok"}
+    return {
+        "status": "ok",
+        "draw_st": "ok",
+        "mode": "openai-compatible",
+        "model": VISION_MODEL,
+        "has_openai_key": bool(OPENAI_API_KEY),
+        "has_base_url": bool(OPENAI_BASE_URL),
+    }
 
 
 @app.post("/gemini_element")
@@ -95,8 +107,6 @@ async def gemini_element(payload: GeminiElementRequest, request: Request):
         image = normalize_image_size(image, max_side=1600)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"无法读取图片：{e}")
-
-    image_bytes = image_to_jpeg_bytes(image)
 
     prompt = """
 你是一名人行道现状元素识别Agent。
@@ -189,23 +199,13 @@ reference_objects：用于估算的参考物
 """
 
     try:
-        client = get_gemini_client()
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[
-                types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-                prompt,
-            ],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json"
-            ),
-        )
+        result = call_vision_model(prompt=prompt, image=image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gemini元素识别失败：{e}")
 
     return {
         "gemini_st": "success",
-        "elem_raw": response.text,
+        "elem_raw": result,
     }
 
 
@@ -218,8 +218,6 @@ async def gemini_coord(payload: GeminiCoordRequest, request: Request):
         image = normalize_image_size(image, max_side=1600)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"无法读取图片：{e}")
-
-    image_bytes = image_to_jpeg_bytes(image)
 
     prompt = f"""
 你是一名人行道问题图像定位Agent。
@@ -271,23 +269,13 @@ P3：如果位置不明确，可以设为不可定位。
 """
 
     try:
-        client = get_gemini_client()
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[
-                types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-                prompt,
-            ],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json"
-            ),
-        )
+        result = call_vision_model(prompt=prompt, image=image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gemini坐标定位失败：{e}")
 
     return {
         "gemini_st": "success",
-        "anno_raw": response.text,
+        "anno_raw": result,
     }
 
 
@@ -381,22 +369,63 @@ async def draw_annotation(payload: DrawRequest, request: Request):
     }
 
 
-def get_gemini_client():
-    if not GEMINI_API_KEY:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY is not set")
-    return genai.Client(api_key=GEMINI_API_KEY)
+def call_vision_model(prompt: str, image: Image.Image) -> str:
+    if not OPENAI_API_KEY:
+        raise ValueError("OPENAI_API_KEY is not set")
+
+    if not OPENAI_BASE_URL:
+        raise ValueError("OPENAI_BASE_URL is not set")
+
+    image_b64 = image_to_base64(image)
+
+    client = OpenAI(
+        api_key=OPENAI_API_KEY,
+        base_url=OPENAI_BASE_URL,
+    )
+
+    response = client.chat.completions.create(
+        model=VISION_MODEL,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt,
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{image_b64}"
+                        },
+                    },
+                ],
+            }
+        ],
+        temperature=0.1,
+        stream=False,
+    )
+
+    content = response.choices[0].message.content
+
+    if not content:
+        raise ValueError("模型返回内容为空")
+
+    return content
 
 
-def image_to_jpeg_bytes(image: Image.Image) -> bytes:
+def image_to_base64(image: Image.Image) -> str:
     buf = BytesIO()
     image.convert("RGB").save(buf, format="JPEG", quality=92)
-    return buf.getvalue()
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
 def check_auth(request: Request):
     if not API_KEY:
         return
+
     provided = request.headers.get("x-api-key", "").strip()
+
     if provided != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
@@ -418,7 +447,7 @@ def load_image(img_input: Any) -> Image.Image:
         raise ValueError("img中没有可用的图片URL")
 
     if url.startswith("http://") or url.startswith("https://"):
-        headers = {"User-Agent": "sidewalk-annotation-api/2.0"}
+        headers = {"User-Agent": "sidewalk-annotation-api/3.0"}
         resp = requests.get(url, timeout=30, headers=headers)
         resp.raise_for_status()
         return Image.open(BytesIO(resp.content)).convert("RGB")
@@ -432,8 +461,10 @@ def load_image(img_input: Any) -> Image.Image:
 def normalize_image_size(image: Image.Image, max_side: int = 1800) -> Image.Image:
     w, h = image.size
     scale = min(1.0, max_side / max(w, h))
+
     if scale < 1.0:
         return image.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+
     return image
 
 
@@ -444,6 +475,7 @@ def load_fonts(base_w: int):
     ]
 
     path = None
+
     for p in candidates:
         if os.path.exists(p):
             path = p
@@ -550,7 +582,12 @@ def draw_legend_panel(draw, x0, y0, panel_w, panel_h, title, legend_items, fonts
         y += 32
 
         if problem_type:
-            draw.text((x0 + pad + 28, y - 4), str(problem_type)[:24], fill=(100, 100, 100), font=font_small)
+            draw.text(
+                (x0 + pad + 28, y - 4),
+                str(problem_type)[:24],
+                fill=(100, 100, 100),
+                font=font_small,
+            )
             y += 28
 
         y += 8
