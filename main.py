@@ -219,6 +219,13 @@ async def gemini_coord(payload: GeminiCoordRequest, request: Request):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"无法读取图片：{e}")
 
+    # prob_lst 为空时直接返回空标注
+    if not payload.prob_lst:
+        return {
+            "gemini_st": "success",
+            "anno_raw": json.dumps({"anno_lst": []}, ensure_ascii=False)
+        }
+
     prompt = f"""
 你是一名人行道问题图像定位Agent。
 
@@ -241,43 +248,41 @@ async def gemini_coord(payload: GeminiCoordRequest, request: Request):
 4. bbox 应框选问题对象或问题区域；
 5. 如果无法定位，locatable=false，bbox=null。
 
-标注规则：
-P1：优先定位，必须尽量给出bbox；
-P2：可以定位则给bbox；
-P3：如果位置不明确，可以设为不可定位。
-
 问题清单 prob_lst：
 {json.dumps(payload.prob_lst, ensure_ascii=False)}
 
 严格输出JSON，不要输出解释、分析过程或Markdown。
 
-{
+{{
   "anno_lst": [
-    {
+    {{
       "problem_id": "P-001",
-      "severity": "P1",
-      "problem_type": "通行问题",
-      "label": "P1-01",
+      "severity": "P2",
+      "problem_type": "设施品质问题",
+      "label": "P2-01",
       "locatable": true,
       "bbox": [0.10, 0.20, 0.40, 0.50],
       "arrow_start": null,
       "arrow_end": null,
-      "legend_text": "核心通行空间被占用"
-    }
+      "legend_text": "设施状态一般"
+    }}
   ]
-}
+}}
 """
 
     try:
         result = call_vision_model(prompt=prompt, image=image)
+        return {
+            "gemini_st": "success",
+            "anno_raw": result
+        }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Gemini坐标定位失败：{e}")
-
-    return {
-        "gemini_st": "success",
-        "anno_raw": result,
-    }
-
+        # 不再让 Render 直接 500 崩掉，而是返回可读错误
+        return {
+            "gemini_st": "failed",
+            "anno_raw": json.dumps({"anno_lst": []}, ensure_ascii=False),
+            "error": str(e)
+        }
 
 @app.post("/draw")
 async def draw_annotation(payload: DrawRequest, request: Request):
