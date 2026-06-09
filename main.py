@@ -25,6 +25,8 @@ app.add_middleware(
 OUTPUT_DIR = os.path.join(os.getcwd(), "static")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+app.mount("/static", StaticFiles(directory=OUTPUT_DIR), name="static")
+
 # Optional: set API_KEY in Render environment variables.
 API_KEY = os.getenv("API_KEY", "").strip()
 
