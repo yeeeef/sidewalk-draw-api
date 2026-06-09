@@ -1,4 +1,6 @@
-fastapi==0.115.6
-uvicorn==0.32.1
-pillow==10.4.0
-requests==2.32.3
+fastapi
+uvicorn
+requests
+pillow
+google-genai
+python-multipart
